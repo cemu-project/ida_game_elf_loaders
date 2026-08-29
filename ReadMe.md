@@ -32,6 +32,6 @@ Optionally, you can also build using cmake with the following command
 
 ## Notes
 
-The current commit was compiled and tested to work with IDA 9.3.
+The current commit was compiled and tested to work with IDA 9.4.
 It also comes with improved Wii U RPX/RPL support, including compressed sections,
 FILE_INFO parsing, import/export metadata, and a broader set of relocations.

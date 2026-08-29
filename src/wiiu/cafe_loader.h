@@ -75,7 +75,7 @@ private:
 
   void processImports();
   void processExports();
-
+  void processExportTable(const char *segname, bool makecode);
   void swapSymbols();
   void applySymbols();
 };

@@ -237,20 +237,22 @@ void cafe_loader::applySegment(uint32 sel,
                                uchar align,
                                bool load)
 {
-  segment_t seg;
-  seg.start_ea = addr;
-  seg.end_ea = addr + size;
-  seg.color = DEFCOLOR;
-  seg.sel = sel;
-  seg.bitness = 1;
-  seg.orgbase = sel;
-  seg.comb = scPub;
-  seg.perm = perm;
-  seg.flags = SFL_LOADER;
-  seg.align = align;
-
   set_selector(sel, 0);
-  add_segm_ex(&seg, name != nullptr ? name : "", sclass, 0);
+
+  segment_info_t si;
+  si.start_ea = addr;
+  si.end_ea = addr + size;
+  si.set_sel(sel);
+  si.set_orgbase(sel);
+  si.set_bitness(1); // 32-bit
+  si.set_comb(scPub);
+  si.set_perm(perm);
+  si.set_flags(SFL_LOADER);
+  si.set_align(align);
+  si.set_name(name != nullptr ? name : "");
+  si.set_sclass(sclass);
+
+  add_segment_ex(&si, ADDSEG_NOSREG);
 
   if (load && data != nullptr && size != 0)
     mem2base(data, addr, addr + size, BADADDR);
@@ -900,7 +902,7 @@ void cafe_loader::processImports()
     const ea_t import_ea = imp.is_function && imp.thunk_ea != BADADDR
                          ? imp.thunk_ea
                          : imp.table_ea;
-    if (import_ea == BADADDR || getseg(import_ea) == nullptr)
+    if (import_ea == BADADDR || get_segment_ea(import_ea) == BADADDR)
       continue;
 
     if (!force_name(import_ea, imp.name.c_str()))
@@ -924,74 +926,48 @@ void cafe_loader::processImports()
 
 void cafe_loader::processExports()
 {
-  segment_t *seg = get_segm_by_name(".fexports");
-  if (seg != nullptr)
+  processExportTable(".fexports", true);
+  processExportTable(".dexports", false);
+}
+
+void cafe_loader::processExportTable(const char *segname, bool makecode)
+{
+  const ea_t start = get_segment_ea_by_name(segname);
+  if (start == BADADDR)
+    return;
+
+  segment_info_t info;
+  if (!get_segment_info(&info, start))
+    return;
+  const ea_t seg_size = info.end_ea - info.start_ea;
+  if (seg_size < 8)
+    return;
+
+  const uint32 num_exports = std::min(get_dword(start), static_cast<uint32>(seg_size / 8) - 1);
+  for (uint32 i = 0; i < num_exports + 1; ++i)
   {
-    const ea_t start = seg->start_ea;
-    const ea_t seg_size = seg->end_ea - start;
-    if (seg_size >= 8)
-    {
-      const uint32 num_exports = std::min(get_dword(start), static_cast<uint32>(seg_size / 8) - 1);
+    create_dword(start + (i * 8) + 0, 4);
+    create_dword(start + (i * 8) + 4, 4);
 
-      for (uint32 i = 0; i < num_exports + 1; ++i)
-      {
-        create_dword(start + (i * 8) + 0, 4);
-        create_dword(start + (i * 8) + 4, 4);
+    if (i == 0)
+      continue;
 
-        if (i == 0)
-          continue;
+    const uint32 addr = get_dword(start + (i * 8) + 0);
+    const uint32 name = get_dword(start + (i * 8) + 4) & 0x7FFFFFFF;
+    if (name >= seg_size || get_segment_ea(addr) == BADADDR)
+      continue;
 
-        const uint32 addr = get_dword(start + (i * 8) + 0);
-        const uint32 name = get_dword(start + (i * 8) + 4) & 0x7FFFFFFF;
-        if (name >= seg_size || getseg(addr) == nullptr)
-          continue;
+    if (makecode)
+      auto_make_proc(addr);
 
-        auto_make_proc(addr);
-
-        qstring exp;
-        get_strlit_contents(
-          &exp,
-          start + name,
-          get_max_strlit_length(start + name, STRTYPE_C, true),
-          STRTYPE_C);
-        if (!exp.empty())
-          add_entry(addr, addr, exp.c_str(), true);
-      }
-    }
-  }
-
-  seg = get_segm_by_name(".dexports");
-  if (seg != nullptr)
-  {
-    const ea_t start = seg->start_ea;
-    const ea_t seg_size = seg->end_ea - start;
-    if (seg_size >= 8)
-    {
-      const uint32 num_exports = std::min(get_dword(start), static_cast<uint32>(seg_size / 8) - 1);
-
-      for (uint32 i = 0; i < num_exports + 1; ++i)
-      {
-        create_dword(start + (i * 8) + 0, 4);
-        create_dword(start + (i * 8) + 4, 4);
-
-        if (i == 0)
-          continue;
-
-        const uint32 addr = get_dword(start + (i * 8) + 0);
-        const uint32 name = get_dword(start + (i * 8) + 4) & 0x7FFFFFFF;
-        if (name >= seg_size || getseg(addr) == nullptr)
-          continue;
-
-        qstring exp;
-        get_strlit_contents(
-          &exp,
-          start + name,
-          get_max_strlit_length(start + name, STRTYPE_C, true),
-          STRTYPE_C);
-        if (!exp.empty())
-          add_entry(addr, addr, exp.c_str(), false);
-      }
-    }
+    qstring exp;
+    get_strlit_contents(
+      &exp,
+      start + name,
+      get_max_strlit_length(start + name, STRTYPE_C, ALOPT_IGNHEADS),
+      STRTYPE_C);
+    if (!exp.empty())
+      add_entry(addr, addr, exp.c_str(), makecode);
   }
 }
 
@@ -1034,13 +1010,11 @@ void cafe_loader::applySymbols()
       continue;
     if (symbol.st_shndx == SHN_ABS || symbol.st_shndx == SHN_UNDEF)
       continue;
-    if (symbol.st_shndx >= m_elf->getNumSections())
+    if (get_segment_ea(symbol.st_value) == BADADDR)
       continue;
     if (isImportSection(symbol.st_shndx))
       continue;
     if ((m_elf->getSections()[symbol.st_shndx].sh_flags & SHF_ALLOC) == 0)
-      continue;
-    if (getseg(symbol.st_value) == nullptr)
       continue;
 
     const char *name = &string_table[symbol.st_name];

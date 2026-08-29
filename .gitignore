@@ -5,6 +5,7 @@
 /build
 src/wiiu/CMakeSettings.json
 
+src/wiiu/build-linux/
 src/wiiu/out/
 
 src/wiiu/.vs/

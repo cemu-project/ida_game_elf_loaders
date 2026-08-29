@@ -202,9 +202,8 @@ public:
 
   void print() {
     this->printHeader();
-    this->printSegment();
+    this->printSegments();
     this->printSections();
-    this->printSymbols();
   }
 
   bool verifyHeader() {
