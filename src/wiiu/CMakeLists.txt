@@ -25,19 +25,14 @@ endif()
 # IDA 9.4 SDK ships import libraries per host/arch/ea-size under
 # lib/<arch>_<plat>_<bits>. Loaders are 64-bit EA (IDA 9.x is __EA64__ only
 # in practice), and the official Windows builds are MSVC x64.
-if(WIN32 AND MSVC)
+if(WIN32 OR (CMAKE_SYSTEM_NAME STREQUAL "Windows"))
+    # MSVC, MinGW, or a cross-compile targeting Windows all link the
+    # Windows import library.
     set(IDA_LIBRARY "${IDA_SDK_ROOT}/lib/x64_win_64/ida.lib")
-elseif(WIN32 AND MINGW)
-    set(IDA_LIBRARY "${IDA_SDK_ROOT}/lib/x64_win_64/ida.lib")
-elseif(UNIX AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND WIN32)
-        # Cross-compiling to Windows with mingw (nix pkgsCross etc.)
-        set(IDA_LIBRARY "${IDA_SDK_ROOT}/lib/x64_win_64/ida.lib")
-    else()
-        set(IDA_LIBRARY "${IDA_SDK_ROOT}/lib/x64_linux_64/libida.so")
-    endif()
 elseif(APPLE)
     set(IDA_LIBRARY "${IDA_SDK_ROOT}/lib/x64_mac_64/libida.dylib")
+elseif(UNIX)
+    set(IDA_LIBRARY "${IDA_SDK_ROOT}/lib/x64_linux_64/libida.so")
 else()
     message(FATAL_ERROR "Unsupported host for the Wii U loader build.")
 endif()
@@ -57,7 +52,6 @@ set(SOURCES
     cafe.h
     cafe_loader.h
     cafe_loader.cpp
-    tinfl.c
     wiiu.cpp
 )
 
