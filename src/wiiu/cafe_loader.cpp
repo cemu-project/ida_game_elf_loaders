@@ -9,7 +9,7 @@
 
 constexpr uint32 kImportHeaderSize = 8;
 constexpr uint32 kRplFlagIsRpx = 1u << 1;
-constexpr ea_t kImportThunkSize = 8;
+constexpr ea_t kImportThunkSize = 16;
 constexpr ea_t kRel24TrampolineSize = 16;
 
 constexpr uint32 R_PPC_GHS_REL16_HA = 251;
@@ -84,18 +84,6 @@ static bool calc_rel14(uint16 *out, ea_t value, ea_t from)
   return true;
 }
 
-static ea_t decode_branch_target(uint32 inst, ea_t from)
-{
-  int32 distance = static_cast<int32>(inst & 0x03FFFFFC);
-  if ((distance & 0x02000000) != 0)
-    distance |= static_cast<int32>(0xFC000000);
-
-  if ((inst & 2) != 0)
-    return static_cast<ea_t>(distance);
-
-  return static_cast<ea_t>(static_cast<int32>(from) + distance);
-}
-
 cafe_loader::cafe_loader(elf_reader<elf32> *elf)
   : m_elf(elf),
     m_sdaBase(0),
@@ -125,6 +113,7 @@ void cafe_loader::apply()
   swapSymbols();
   collectFileInfo();
   collectImports();
+  prepareTextRegion();
   collectImportThunks();
   createTextTrampolineSegments();
   applyRelocations();
@@ -319,17 +308,13 @@ void cafe_loader::collectFileInfo()
   }
 }
 
-void cafe_loader::createTextTrampolineSegments()
+void cafe_loader::prepareTextRegion()
 {
   m_haveTextRegion = false;
   m_textAllocBase = BADADDR;
   m_textAllocEnd = BADADDR;
   m_textLoadStart = BADADDR;
   m_textLoadEnd = BADADDR;
-  m_preTrampStart = BADADDR;
-  m_preTrampCursor = BADADDR;
-  m_postTrampCursor = BADADDR;
-  m_postTrampEnd = BADADDR;
   m_internalTrampolines.clear();
 
   if (!m_haveFileInfo || m_textSize == 0)
@@ -360,6 +345,15 @@ void cafe_loader::createTextTrampolineSegments()
   m_textAllocBase = m_textLoadStart - m_trampAdjust;
   m_textAllocEnd = m_textAllocBase + m_textSize;
   m_haveTextRegion = m_textAllocEnd > m_textLoadStart;
+}
+
+void cafe_loader::createTextTrampolineSegments()
+{
+  m_preTrampStart = BADADDR;
+  m_preTrampCursor = BADADDR;
+  m_postTrampCursor = BADADDR;
+  m_postTrampEnd = BADADDR;
+
   if (!m_haveTextRegion || m_textAllocEnd <= m_textLoadEnd)
     return;
 
@@ -537,6 +531,13 @@ void cafe_loader::collectImportThunks()
     return;
 
   const auto nsym = symbol_section->getSize() / symbol_section->sh_entsize;
+  if (!m_haveTextRegion || m_textLoadEnd == BADADDR || m_textAllocEnd == BADADDR)
+    return;
+
+  // The branch displacement stored in the file points at a link-time
+  // placeholder, not a stable import address. The Cafe runtime assigns
+  // 16-byte trampolines from the reserved text tail and rewrites REL24.
+  ea_t next_thunk = align_up_ea(m_textLoadEnd, kImportThunkSize);
 
   for (auto &section : m_elf->getSections())
   {
@@ -563,34 +564,24 @@ void cafe_loader::collectImportThunks()
       if (import_index < 0 || !m_imports[import_index].is_function)
         continue;
 
-      const ea_t target = decode_branch_target(get_original_dword(rela.r_offset), rela.r_offset);
-      if (target == BADADDR)
-        continue;
-
       auto &imp = m_imports[import_index];
-      if (imp.thunk_ea == BADADDR)
+      if (imp.thunk_ea != BADADDR)
+        continue;
+      if (next_thunk + kImportThunkSize > m_textAllocEnd)
       {
-        imp.thunk_ea = target;
-      }
-      else if (imp.thunk_ea != target)
-      {
-        msg("Import thunk mismatch for %s at %08X and %08X\n",
-            imp.name.c_str(),
-            static_cast<uint32>(imp.thunk_ea),
-            static_cast<uint32>(target));
+        msg("No reserved text space for import thunk %s\n", imp.name.c_str());
+        continue;
       }
 
-      m_importThunkStart = m_importThunkStart == BADADDR
-                         ? target
-                         : std::min(m_importThunkStart, target);
-      m_importThunkEnd = m_importThunkEnd == BADADDR
-                       ? target + kImportThunkSize
-                       : std::max(m_importThunkEnd, target + kImportThunkSize);
+      imp.thunk_ea = next_thunk;
+      m_importThunkStart = m_importThunkStart == BADADDR ? next_thunk : m_importThunkStart;
+      next_thunk += kImportThunkSize;
+      m_importThunkEnd = next_thunk;
     }
   }
 }
 
-ea_t cafe_loader::ensureImportThunk(size_t symbol_index, ea_t reloc_ea)
+ea_t cafe_loader::ensureImportThunk(size_t symbol_index)
 {
   if (!m_haveTextRegion || symbol_index >= m_symbol_imports.size())
     return BADADDR;
@@ -603,10 +594,9 @@ ea_t cafe_loader::ensureImportThunk(size_t symbol_index, ea_t reloc_ea)
   if (!imp.is_function)
     return imp.table_ea;
 
-  if (imp.thunk_ea == BADADDR)
-    imp.thunk_ea = decode_branch_target(get_original_dword(reloc_ea), reloc_ea);
-
-  if (imp.thunk_ea < m_textAllocBase || imp.thunk_ea >= m_textAllocEnd)
+  if (imp.thunk_ea == BADADDR
+      || imp.thunk_ea < m_textAllocBase
+      || imp.thunk_ea + kImportThunkSize > m_textAllocEnd)
     return BADADDR;
 
   return imp.thunk_ea;
@@ -816,10 +806,9 @@ void cafe_loader::applyRelocations()
         const uint32 inst = get_original_dword(rela.r_offset);
         if (imported_function)
         {
-          branch_target = ensureImportThunk(sym_index, rela.r_offset);
+          branch_target = ensureImportThunk(sym_index);
           if (branch_target == BADADDR)
             break;
-          break;
         }
         if ((weak || undef_placeholder) && symbol_value == 0)
           branch_target = rela.r_offset + rela.r_addend;
@@ -838,10 +827,9 @@ void cafe_loader::applyRelocations()
         const uint32 inst = get_original_dword(rela.r_offset);
         if (imported_function)
         {
-          branch_target = ensureImportThunk(sym_index, rela.r_offset);
+          branch_target = ensureImportThunk(sym_index);
           if (branch_target == BADADDR)
             break;
-          break;
         }
         if ((weak || undef_placeholder) && symbol_value == 0)
           branch_target = rela.r_offset + rela.r_addend;

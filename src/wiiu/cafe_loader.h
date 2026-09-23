@@ -63,10 +63,11 @@ private:
 
   void collectFileInfo();
   void collectImports();
+  void prepareTextRegion();
   void collectImportThunks();
   void createTextTrampolineSegments();
   bool isImportSection(uint16 section_index) const;
-  ea_t ensureImportThunk(size_t symbol_index, ea_t reloc_ea);
+  ea_t ensureImportThunk(size_t symbol_index);
   ea_t resolveSymbolValue(size_t symbol_index) const;
   ea_t createRel24Trampoline(ea_t target);
   int32 resolveTlsModuleIndex(size_t symbol_index) const;
